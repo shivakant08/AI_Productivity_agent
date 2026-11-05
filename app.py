@@ -1,124 +1,74 @@
-# import os
-# import streamlit as st
-# from agent import run_agent_turn
-# from database import init_db
-
-# init_db()
-
-# st.set_page_config(
-#     page_title="AI Productivity Agent", page_icon="⚡", layout="centered"
-# )
-
-# st.title("⚡ Local AI Productivity Agent")
-# st.caption(
-
-#     "Powered by Ollama (Qwen 2.5) & Python ReAct Loop running 100% locally."
-# )
-
-# if "messages" not in st.session_state:
-#     st.session_state.messages = []
-
-# for message in st.session_state.messages:
-#     with st.chat_message(message["role"]):
-#         st.markdown(message["content"])
-
-# if prompt := st.chat_input(
-#     "What would you like me to do? (e.g., 'Add review PR to tasks for"
-#     " tomorrow')"
-# ) :
-#     st.session_state.messages.append({"role": "user", "content": "prompt"})
-#     with st.chat_message("user"):
-#         st.markdown(prompt)
-
-#     with st.chat_message("assistant"):
-#         with st.spinner("Agent thinking & checking tools..."):
-#             history_payload = [
-#                 {
-#                     "role": "system",
-#                     "content": (
-#                         "You are an expert personal productivity and workflow"
-#                         " automation agennt."
-#                     ),
-#                 }
-#             ]
-#             for m in st.session_state.messages[:-1]:
-#                 history_payload.append({"role": m["role"], "content": m["content"]})
-
-#             agent_response = run_agent_turn(prompt, history_payload)
-#             st.markdown(agent_response)
-
-#     st.session_state.messages.append(
-#         {"role": "assistant", "content": agent_response}
-#     )
-
 import os
 import streamlit as st
 from agent import run_agent_turn
 from database import init_db
 
-# Initialize database on app boot
 init_db()
 
 st.set_page_config(
     page_title="AI Productivity Agent", page_icon="⚡", layout="centered"
 )
 
-st.title("⚡ Local AI Productivity Agent")
-st.caption(
-    "Powered by Ollama (Qwen2.5) & Python ReAct Loop running 100% locally."
-)
+st.title("⚡ Local AI Productivity Agent (RAG + Streaming)")
+st.caption("Powered by Ollama (Qwen2.5:3b + nomic-embed-text) & ChromaDB.")
 
-# Initialize chat history in session state safely
 if "messages" not in st.session_state:
   st.session_state.messages = []
 
-# Display prior chat history
 for message in st.session_state.messages:
   with st.chat_message(message["role"]):
     st.markdown(message["content"])
-    # If a trace exists for this message, render it
     if "trace" in message and message["trace"]:
       with st.expander("🔍 Agent Reasoning & Tool Trace"):
         for log in message["trace"]:
           st.json(log)
 
-# Accept user prompt via chat input box
 if prompt := st.chat_input(
-    "What would you like me to do? (e.g., 'Read README.md and add a task to"
-    " review it')"
+    "Try: 'Save a note about our cloud migration strategy' then 'What did I"
+    " note about cloud migration?'"
 ):
-  # Display user message
   st.session_state.messages.append({"role": "user", "content": prompt})
   with st.chat_message("user"):
     st.markdown(prompt)
 
-  # Generate agent response with a spinner
   with st.chat_message("assistant"):
-    with st.spinner("Agent thinking & checking tools..."):
+    with st.spinner("Agent thinking & checking vector memory..."):
       history_payload = [
           {
               "role": "system",
-              "content": (
-                  "You are an expert personal productivity and workflow"
-                  " automation agent."
-              ),
+              "content": "You are an expert productivity agent.",
           }
       ]
       for m in st.session_state.messages[:-1]:
         history_payload.append({"role": m["role"], "content": m["content"]})
 
-      agent_response, trace_logs = run_agent_turn(prompt, history_payload)
-      st.markdown(agent_response)
+      stream_response, trace_logs = run_agent_turn(prompt, history_payload)
 
-      # Show the trace immediately in an expander
+      # Stream tokens live into the Streamlit UI
+      def generate_tokens():
+        for chunk in stream_response:
+          if chunk.choices[0].delta.content is not None:
+            yield chunk.choices[0]
+
+      full_response = st.write_stream(
+          chunk.choices[0].delta.content
+          for chunk in stream_response
+          if chunk.choices[0].delta.content is not None
+      )
+
       if trace_logs:
         with st.expander("🔍 Agent Reasoning & Tool Trace"):
           for log in trace_logs:
             st.json(log)
 
-  # Save assistant reply and trace to state history
   st.session_state.messages.append({
       "role": "assistant",
-      "content": agent_response,
+      "content": full_response,
       "trace": trace_logs,
-  }) 
+  })
+
+
+
+  # Prompt 1: "Save a note: We decided to migrate our production database from MySQL to PostgreSQL next quarter."
+
+# Prompt 2: "What are our plans regarding the database backend?" (Watch it use semantic search to fetch your note even without exact keyword matches, while streaming the answer live word-by-word!)
