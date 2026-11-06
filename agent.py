@@ -2,14 +2,14 @@ import json
 import os
 import sqlite3
 import chromadb
-import httpx2
+import httpx
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
 
 # Setup HTTP client with SSL/proxy bypass for local Ollama
-http_client = httpx2.Client(
+http_client = httpx.Client(
     base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
     trust_env=False,
 )
@@ -22,8 +22,19 @@ CLIENT = OpenAI(
 MODEL_NAME = os.getenv("MODEL_NAME", "qwen2.5:3b")
 DB_PATH = "data/productivity.db"
 
-# Initialize ChromaDB persistent vector store locally
-chroma_client = chromadb.PersistentClient(path="data/chroma_db")
+# Version-safe ChromaDB initialization
+try:
+  chroma_client = chromadb.PersistentClient(path="data/chroma_db")
+except AttributeError:
+  from chromadb.config import Settings
+
+  chroma_client = chromadb.Client(
+      Settings(
+          chroma_db_impl="duckdb+parquet",
+          persist_directory="data/chroma_db",
+      )
+  )
+
 notes_collection = chroma_client.get_or_create_collection(name="user_notes")
 
 
@@ -93,15 +104,27 @@ def add_note(content: str) -> str:
 
 
 def search_notes_semantically(query: str) -> str:
-  """Searches saved notes by meaning using vector similarity."""
+  """Searches saved notes by meaning using vector similarity safely."""
   try:
+    # Check how many notes exist in the collection first
+    total_notes = notes_collection.count()
+    if total_notes == 0:
+      return json.dumps({
+          "status": "success",
+          "matches": [],
+          "message": "No notes saved in the vector database yet.",
+      })
+
+    # Dynamically adjust n_results so it never exceeds available documents
+    n_results = min(3, total_notes)
+
     embedding_response = CLIENT.embeddings.create(
         model="nomic-embed-text", input=query
     )
     query_vector = embedding_response.data[0].embedding
 
     results = notes_collection.query(
-        query_embeddings=[query_vector], n_results=3
+        query_embeddings=[query_vector], n_results=n_results
     )
     documents = results.get("documents", [[]])[0]
 
@@ -113,7 +136,6 @@ def search_notes_semantically(query: str) -> str:
     return json.dumps({"status": "success", "matches": documents})
   except Exception as e:
     return json.dumps({"status": "error", "message": str(e)})
-
 
 def read_local_file(filename: str) -> str:
   """Reads the content of a local text file in the project directory."""
@@ -157,7 +179,8 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "list_tasks",
-            "description": "Retrieve all tasks.",
+            "description": "Retrieve all tasks and to-do items from the database. Do NOT"
+                " use this for architectural questions or notes.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -180,8 +203,10 @@ TOOLS_SCHEMA = [
         "function": {
             "name": "search_notes_semantically",
             "description": (
-                "Search through saved notes using semantic similarity or"
-                " concepts."
+                "Search through saved notes, project details, architecture"
+                " decisions, and thoughts using semantic similarity. ALWAYS use"
+                " this when asked about past notes, system architecture, or"
+                " saved technical info."
             ),
             "parameters": {
                 "type": "object",
@@ -219,8 +244,14 @@ def run_agent_turn(user_prompt: str, chat_history: list = None):
         {
             "role": "system",
             "content": (
-                "You are an expert productivity agent with RAG search"
-                " capabilities for notes."
+                "You are an expert productivity agent with local SQLite task"
+                " management and ChromaDB RAG capabilities.\n"
+                "RULES FOR TOOL USAGE:\n"
+                "1. Whenever the user asks about past notes, thoughts, or information"
+                " they previously saved, ALWAYS use the `search_notes_semantically`"
+                " tool. Never guess or look for a file like 'meeting_notes.txt'"
+                " unless a specific filename is explicitly requested.\n"
+                "2. Use `add_note` to save new thoughts or meeting notes."
             ),
         }
     ]
@@ -229,7 +260,6 @@ def run_agent_turn(user_prompt: str, chat_history: list = None):
   trace_logs = []
 
   # First pass: check for tool calls
-  response = CLIENT.completions.create
   response = CLIENT.chat.completions.create(
       model=MODEL_NAME, messages=chat_history, tools=TOOLS_SCHEMA
   )
